@@ -559,3 +559,12 @@ const (
 type PreviewStatusUpdater interface {
 	SetPreviewStatus(previewHandle any, status CardStatus)
 }
+
+// DirectNotifier is an optional interface for platforms that can send
+// notifications directly to a user by their platform user ID, without
+// requiring an active session. Metadata is stored alongside the notification
+// so the platform can retrieve it when the user replies (useful when the
+// messaging platform truncates quoted content).
+type DirectNotifier interface {
+	SendNotification(ctx context.Context, userID, title, content string, metadata map[string]string) error
+}

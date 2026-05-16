@@ -1,6 +1,7 @@
 package core
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -71,6 +72,7 @@ func NewAPIServer(dataDir string) (*APIServer, error) {
 	s.mux.HandleFunc("/relay/send", s.handleRelaySend)
 	s.mux.HandleFunc("/relay/bind", s.handleRelayBind)
 	s.mux.HandleFunc("/relay/binding", s.handleRelayBinding)
+	s.mux.HandleFunc("/notify", s.handleNotify)
 
 	return s, nil
 }
@@ -496,4 +498,83 @@ func (s *APIServer) handleRelayBinding(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	apiJSON(w, http.StatusOK, binding)
+}
+
+// ── Notify API ────────────────────────────────────────────────
+
+// NotifyRequest is the JSON body for POST /notify.
+type NotifyRequest struct {
+	Platform string            `json:"platform"`
+	UserID   string            `json:"user_id"`
+	Title    string            `json:"title"`
+	Content  string            `json:"content"`
+	Metadata map[string]string `json:"metadata,omitempty"`
+}
+
+func (s *APIServer) handleNotify(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST only", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req NotifyRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if req.UserID == "" || req.Content == "" {
+		http.Error(w, "user_id and content are required", http.StatusBadRequest)
+		return
+	}
+	if req.Platform == "" {
+		req.Platform = "dingtalk"
+	}
+
+	s.mu.RLock()
+	var engine *Engine
+	if len(s.engines) == 1 {
+		for _, e := range s.engines {
+			engine = e
+		}
+	} else {
+		for _, e := range s.engines {
+			engine = e
+			break
+		}
+	}
+	s.mu.RUnlock()
+
+	if engine == nil {
+		http.Error(w, "no engine available", http.StatusServiceUnavailable)
+		return
+	}
+
+	var targetPlatform Platform
+	for _, p := range engine.platforms {
+		if p.Name() == req.Platform {
+			targetPlatform = p
+			break
+		}
+	}
+	if targetPlatform == nil {
+		http.Error(w, fmt.Sprintf("platform %q not found", req.Platform), http.StatusNotFound)
+		return
+	}
+
+	notifier, ok := targetPlatform.(DirectNotifier)
+	if !ok {
+		http.Error(w, fmt.Sprintf("platform %q does not support direct notifications", req.Platform), http.StatusBadRequest)
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+	defer cancel()
+
+	if err := notifier.SendNotification(ctx, req.UserID, req.Title, req.Content, req.Metadata); err != nil {
+		slog.Warn("notify: send failed", "platform", req.Platform, "user_id", req.UserID, "error", err)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	apiJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }

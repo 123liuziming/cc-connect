@@ -3,6 +3,7 @@ package dingtalk
 import (
 	"encoding/json"
 	"net/http"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -247,7 +248,7 @@ func TestFormatReplyContent_WithQuotedText(t *testing.T) {
 			Content: repliedContent,
 		},
 	}
-	result := p.formatReplyContent(richText, "fallback")
+	result := p.formatReplyContent(richText, "fallback", "")
 	expected := "引用: \"original message\"\n\nuser reply"
 	if result != expected {
 		t.Errorf("formatReplyContent() = %q, want %q", result, expected)
@@ -265,7 +266,7 @@ func TestFormatReplyContent_EmptyContent_UsesFallback(t *testing.T) {
 			Content: repliedContent,
 		},
 	}
-	result := p.formatReplyContent(richText, "fallback text")
+	result := p.formatReplyContent(richText, "fallback text", "")
 	expected := "引用: \"quoted\"\n\nfallback text"
 	if result != expected {
 		t.Errorf("formatReplyContent() = %q, want %q", result, expected)
@@ -279,7 +280,7 @@ func TestFormatReplyContent_NilRepliedMsg(t *testing.T) {
 		IsReplyMsg: true,
 		RepliedMsg: nil,
 	}
-	result := p.formatReplyContent(richText, "fallback")
+	result := p.formatReplyContent(richText, "fallback", "")
 	if result != "just a message" {
 		t.Errorf("formatReplyContent() = %q, want %q", result, "just a message")
 	}
@@ -295,9 +296,78 @@ func TestFormatReplyContent_NonTextMsgType(t *testing.T) {
 			Content: json.RawMessage(`{}`),
 		},
 	}
-	result := p.formatReplyContent(richText, "fallback")
+	result := p.formatReplyContent(richText, "fallback", "")
 	if result != "user reply" {
 		t.Errorf("formatReplyContent() = %q, want %q", result, "user reply")
+	}
+}
+
+func TestFormatReplyContent_MarkdownQuotedMessage(t *testing.T) {
+	p := &Platform{}
+	repliedContent, _ := json.Marshal(repliedMarkdownContent{
+		Title: "Multica · Fix login bug",
+		Text:  "### Multica · Fix login bug\n\nSome body text",
+	})
+	richText := &richTextContent{
+		Content:    "user reply",
+		IsReplyMsg: true,
+		RepliedMsg: &repliedMessage{
+			MsgType: "sampleMarkdown",
+			Content: repliedContent,
+		},
+	}
+	result := p.formatReplyContent(richText, "fallback", "")
+	expected := "引用: \"### Multica · Fix login bug\n\nSome body text\"\n\nuser reply"
+	if result != expected {
+		t.Errorf("formatReplyContent() = %q, want %q", result, expected)
+	}
+}
+
+func TestFormatReplyContent_MulticaContextInTextReply(t *testing.T) {
+	p := &Platform{}
+	quotedText := "### Multica · Fix login\n\n---\n\n> Reply to interact\n\n[multica:ws=aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee,issue=11111111-2222-3333-4444-555555555555]"
+	repliedContent, _ := json.Marshal(repliedTextContent{Text: quotedText})
+	richText := &richTextContent{
+		Content:    "请把这个issue标记为done",
+		IsReplyMsg: true,
+		RepliedMsg: &repliedMessage{
+			MsgType: "text",
+			Content: repliedContent,
+		},
+	}
+	result := p.formatReplyContent(richText, "", "")
+	if !strings.Contains(result, "[multica-reply workspace_id=aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee issue_id=11111111-2222-3333-4444-555555555555]") {
+		t.Errorf("expected multica-reply context header, got:\n%s", result)
+	}
+	if !strings.Contains(result, "请把这个issue标记为done") {
+		t.Errorf("expected user message preserved, got:\n%s", result)
+	}
+	if !strings.Contains(result, "multica issue") {
+		t.Errorf("expected multica CLI examples, got:\n%s", result)
+	}
+}
+
+func TestFormatReplyContent_MulticaContextInMarkdownReply(t *testing.T) {
+	p := &Platform{}
+	mdText := "### Multica · Deploy service\n\n---\n\n> Reply to interact\n\n[multica:ws=aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee,issue=11111111-2222-3333-4444-555555555555]"
+	repliedContent, _ := json.Marshal(repliedMarkdownContent{
+		Title: "Multica · Deploy service",
+		Text:  mdText,
+	})
+	richText := &richTextContent{
+		Content:    "add a comment: looks good",
+		IsReplyMsg: true,
+		RepliedMsg: &repliedMessage{
+			MsgType: "sampleMarkdown",
+			Content: repliedContent,
+		},
+	}
+	result := p.formatReplyContent(richText, "", "")
+	if !strings.Contains(result, "[multica-reply workspace_id=aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee") {
+		t.Errorf("expected multica-reply context, got:\n%s", result)
+	}
+	if !strings.Contains(result, "add a comment: looks good") {
+		t.Errorf("expected user message, got:\n%s", result)
 	}
 }
 
@@ -312,9 +382,54 @@ func TestFormatReplyContent_EmptyQuotedText(t *testing.T) {
 			Content: repliedContent,
 		},
 	}
-	result := p.formatReplyContent(richText, "fallback")
+	result := p.formatReplyContent(richText, "fallback", "")
 	if result != "user reply" {
 		t.Errorf("formatReplyContent() = %q, want %q", result, "user reply")
+	}
+}
+
+func TestFormatReplyContent_StoredContextFallback(t *testing.T) {
+	p := &Platform{}
+	// Pre-store notification context for user
+	p.storeNotifyContext("user123", map[string]string{
+		"workspace_id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+		"issue_id":     "11111111-2222-3333-4444-555555555555",
+	})
+	// Simulate DingTalk truncating the quoted text (no multica marker)
+	repliedContent, _ := json.Marshal(repliedTextContent{Text: "### Multica · Fix lo..."})
+	richText := &richTextContent{
+		Content:    "mark this as done",
+		IsReplyMsg: true,
+		RepliedMsg: &repliedMessage{
+			MsgType: "text",
+			Content: repliedContent,
+		},
+	}
+	result := p.formatReplyContent(richText, "", "user123")
+	if !strings.Contains(result, "[multica-reply workspace_id=aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee issue_id=11111111-2222-3333-4444-555555555555]") {
+		t.Errorf("expected stored context fallback, got:\n%s", result)
+	}
+	if !strings.Contains(result, "mark this as done") {
+		t.Errorf("expected user message, got:\n%s", result)
+	}
+}
+
+func TestFormatReplyContent_NoStoredContextFallback(t *testing.T) {
+	p := &Platform{}
+	// No stored context for this user
+	repliedContent, _ := json.Marshal(repliedTextContent{Text: "some message"})
+	richText := &richTextContent{
+		Content:    "user reply",
+		IsReplyMsg: true,
+		RepliedMsg: &repliedMessage{
+			MsgType: "text",
+			Content: repliedContent,
+		},
+	}
+	result := p.formatReplyContent(richText, "", "unknown_user")
+	expected := "引用: \"some message\"\n\nuser reply"
+	if result != expected {
+		t.Errorf("formatReplyContent() = %q, want %q", result, expected)
 	}
 }
 
@@ -436,5 +551,93 @@ func TestExtractRichText(t *testing.T) {
 				t.Errorf("extractRichText() = %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+// ──────────────────────────────────────────────────────────────
+// parseMulticaContext tests
+// ──────────────────────────────────────────────────────────────
+
+func TestParseMulticaContext_Valid(t *testing.T) {
+	text := "some text [multica:ws=aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee,issue=11111111-2222-3333-4444-555555555555] more text"
+	ctx := parseMulticaContext(text)
+	if ctx == nil {
+		t.Fatal("expected non-nil context")
+	}
+	if ctx.WorkspaceID != "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee" {
+		t.Errorf("WorkspaceID = %q, want aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", ctx.WorkspaceID)
+	}
+	if ctx.IssueID != "11111111-2222-3333-4444-555555555555" {
+		t.Errorf("IssueID = %q, want 11111111-2222-3333-4444-555555555555", ctx.IssueID)
+	}
+}
+
+func TestParseMulticaContext_NoMarker(t *testing.T) {
+	ctx := parseMulticaContext("just a normal message")
+	if ctx != nil {
+		t.Error("expected nil context for message without marker")
+	}
+}
+
+func TestParseMulticaContext_MalformedUUID(t *testing.T) {
+	ctx := parseMulticaContext("[multica:ws=not-a-uuid,issue=also-bad]")
+	if ctx != nil {
+		t.Error("expected nil context for malformed UUIDs")
+	}
+}
+
+func TestParseMulticaContext_InFullMarkdown(t *testing.T) {
+	md := "### Multica · Fix bug\n\n> type: `status_changed`\n\n---\n\n> Reply to interact\n\n[multica:ws=01234567-89ab-cdef-0123-456789abcdef,issue=fedcba98-7654-3210-fedc-ba9876543210]"
+	ctx := parseMulticaContext(md)
+	if ctx == nil {
+		t.Fatal("expected non-nil context from full markdown")
+	}
+	if ctx.WorkspaceID != "01234567-89ab-cdef-0123-456789abcdef" {
+		t.Errorf("WorkspaceID = %q", ctx.WorkspaceID)
+	}
+	if ctx.IssueID != "fedcba98-7654-3210-fedc-ba9876543210" {
+		t.Errorf("IssueID = %q", ctx.IssueID)
+	}
+}
+
+// ──────────────────────────────────────────────────────────────
+// extractQuotedText tests
+// ──────────────────────────────────────────────────────────────
+
+func TestExtractQuotedText_TextType(t *testing.T) {
+	content, _ := json.Marshal(repliedTextContent{Text: "hello world"})
+	got := extractQuotedText(&repliedMessage{MsgType: "text", Content: content})
+	if got != "hello world" {
+		t.Errorf("extractQuotedText(text) = %q, want %q", got, "hello world")
+	}
+}
+
+func TestExtractQuotedText_SampleMarkdownType(t *testing.T) {
+	content, _ := json.Marshal(repliedMarkdownContent{Title: "Title", Text: "body text"})
+	got := extractQuotedText(&repliedMessage{MsgType: "sampleMarkdown", Content: content})
+	if got != "body text" {
+		t.Errorf("extractQuotedText(sampleMarkdown) = %q, want %q", got, "body text")
+	}
+}
+
+func TestExtractQuotedText_MarkdownType(t *testing.T) {
+	content, _ := json.Marshal(repliedMarkdownContent{Title: "T", Text: "md body"})
+	got := extractQuotedText(&repliedMessage{MsgType: "markdown", Content: content})
+	if got != "md body" {
+		t.Errorf("extractQuotedText(markdown) = %q, want %q", got, "md body")
+	}
+}
+
+func TestExtractQuotedText_UnsupportedType(t *testing.T) {
+	got := extractQuotedText(&repliedMessage{MsgType: "image", Content: json.RawMessage(`{}`)})
+	if got != "" {
+		t.Errorf("extractQuotedText(image) = %q, want empty", got)
+	}
+}
+
+func TestExtractQuotedText_Nil(t *testing.T) {
+	got := extractQuotedText(nil)
+	if got != "" {
+		t.Errorf("extractQuotedText(nil) = %q, want empty", got)
 	}
 }
