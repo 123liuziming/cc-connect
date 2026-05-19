@@ -28,11 +28,11 @@ func init() {
 }
 
 type replyContext struct {
-	sessionWebhook  string
-	conversationId  string
-	senderStaffId   string
-	isGroup         bool
-	proactive       bool // true when constructed by ReconstructReplyCtx (no sessionWebhook)
+	sessionWebhook string
+	conversationId string
+	senderStaffId  string
+	isGroup        bool
+	proactive      bool // true when constructed by ReconstructReplyCtx (no sessionWebhook)
 }
 
 // richTextContent mirrors the full structure of the DingTalk "text" JSON field,
@@ -76,7 +76,7 @@ type Platform struct {
 	clientID              string
 	clientSecret          string
 	robotCode             string
-	agentID               int64    // Agent ID for work notifications API (numeric)
+	agentID               int64 // Agent ID for work notifications API (numeric)
 	allowFrom             string
 	shareSessionInChannel bool
 	streamClient          *dingtalkClient.StreamClient
@@ -306,7 +306,7 @@ func (p *Platform) onMessage(data *chatbot.BotCallbackDataModel, richText *richT
 	messageContent := data.Text.Content
 	if richText != nil && richText.IsReplyMsg && richText.RepliedMsg != nil {
 		slog.Debug("dingtalk: reply message detected", "msgType", richText.RepliedMsg.MsgType)
-		messageContent = p.formatReplyContent(richText, messageContent, data.SenderStaffId)
+		messageContent = p.formatReplyContent(richText, messageContent, data.SenderStaffId, data.ConversationId)
 	}
 
 	// Handle text messages (default)
@@ -320,10 +320,10 @@ func (p *Platform) onMessage(data *chatbot.BotCallbackDataModel, richText *richT
 		MessageID:  data.MsgId,
 		ChannelKey: data.ConversationId,
 		ReplyCtx: replyContext{
-			sessionWebhook:  data.SessionWebhook,
-			conversationId:  data.ConversationId,
-			senderStaffId:   data.SenderStaffId,
-			isGroup:         data.ConversationType == "2",
+			sessionWebhook: data.SessionWebhook,
+			conversationId: data.ConversationId,
+			senderStaffId:  data.SenderStaffId,
+			isGroup:        data.ConversationType == "2",
 		},
 	}
 
@@ -388,12 +388,12 @@ func (p *Platform) handleAudioMessage(data *chatbot.BotCallbackDataModel, sessio
 				MessageID:  data.MsgId,
 				ChannelKey: data.ConversationId,
 				ReplyCtx: replyContext{
-					sessionWebhook:  data.SessionWebhook,
-					conversationId:  data.ConversationId,
-					senderStaffId:   data.SenderStaffId,
-					isGroup:         data.ConversationType == "2",
+					sessionWebhook: data.SessionWebhook,
+					conversationId: data.ConversationId,
+					senderStaffId:  data.SenderStaffId,
+					isGroup:        data.ConversationType == "2",
 				},
-				FromVoice:  true,
+				FromVoice: true,
 			}
 			p.handler(p, msg)
 		}
@@ -412,12 +412,12 @@ func (p *Platform) handleAudioMessage(data *chatbot.BotCallbackDataModel, sessio
 		MessageID:  data.MsgId,
 		ChannelKey: data.ConversationId,
 		ReplyCtx: replyContext{
-			sessionWebhook:  data.SessionWebhook,
-			conversationId:  data.ConversationId,
-			senderStaffId:   data.SenderStaffId,
-			isGroup:         data.ConversationType == "2",
+			sessionWebhook: data.SessionWebhook,
+			conversationId: data.ConversationId,
+			senderStaffId:  data.SenderStaffId,
+			isGroup:        data.ConversationType == "2",
 		},
-		FromVoice:  true,
+		FromVoice: true,
 		Audio: &core.AudioAttachment{
 			MimeType: mimeType,
 			Data:     audioBytes,
@@ -488,9 +488,9 @@ func (p *Platform) handleImageMessage(data *chatbot.BotCallbackDataModel, sessio
 		UserName:   data.SenderNick,
 		MessageID:  data.MsgId,
 		ReplyCtx: replyContext{
-			sessionWebhook:  data.SessionWebhook,
-			conversationId:  data.ConversationId,
-			senderStaffId:   data.SenderStaffId,
+			sessionWebhook: data.SessionWebhook,
+			conversationId: data.ConversationId,
+			senderStaffId:  data.SenderStaffId,
 		},
 		Images: []core.ImageAttachment{{
 			MimeType: mimeType,
@@ -768,6 +768,7 @@ var _ core.ImageSender = (*Platform)(nil)
 var _ core.StreamingCardPlatform = (*Platform)(nil)
 var _ core.ReplyContextReconstructor = (*Platform)(nil)
 var _ core.DirectNotifier = (*Platform)(nil)
+var _ core.ProactiveContextStorer = (*Platform)(nil)
 
 // CreateStreamingCard creates a new streaming card for the given reply context.
 // Implements core.StreamingCardPlatform.
@@ -1005,8 +1006,8 @@ func (p *Platform) compressAudioWithFFmpeg(ctx context.Context, audio []byte, fo
 	args := []string{
 		"-i", "pipe:0",
 		"-ar", "16000", // 16kHz sample rate for voice
-		"-ac", "1",     // mono
-		"-b:a", "64k",  // 64 kbps bitrate (voice quality)
+		"-ac", "1", // mono
+		"-b:a", "64k", // 64 kbps bitrate (voice quality)
 		"-f", "mp3",
 		"-y",
 		"pipe:1",
@@ -1106,7 +1107,10 @@ func (p *Platform) Stop() error {
 	return nil
 }
 
-var multicaContextRe = regexp.MustCompile(`\[multica:ws=([0-9a-f-]{36}),issue=([0-9a-f-]{36})\]`)
+var (
+	multicaContextRe = regexp.MustCompile(`\[multica:ws=([0-9a-f-]{36}),issue=([0-9a-f-]{36})\]`)
+	uuidRe           = regexp.MustCompile(`(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
+)
 
 // parseMulticaContext extracts workspace_id and issue_id from a
 // [multica:ws=<uuid>,issue=<uuid>] marker embedded in text.
@@ -1116,6 +1120,19 @@ func parseMulticaContext(text string) *multicaContext {
 		return nil
 	}
 	return &multicaContext{WorkspaceID: m[1], IssueID: m[2]}
+}
+
+func parseMulticaMetadata(meta map[string]string) *multicaContext {
+	wsID := strings.TrimSpace(meta["workspace_id"])
+	issueID := strings.TrimSpace(meta["issue_id"])
+	if !uuidRe.MatchString(wsID) || !uuidRe.MatchString(issueID) {
+		return nil
+	}
+	return &multicaContext{WorkspaceID: wsID, IssueID: issueID}
+}
+
+func groupNotifyContextKey(conversationId string) string {
+	return "group:" + conversationId
 }
 
 // extractQuotedText returns the plain text of a quoted/replied message,
@@ -1154,17 +1171,13 @@ func extractQuotedText(replied *repliedMessage) string {
 // use multica CLI to interact with the referenced issue. If the marker is
 // missing (DingTalk truncates quoted content), falls back to stored notification
 // context for the sender.
-func (p *Platform) formatReplyContent(richText *richTextContent, fallback string, senderStaffId string) string {
+func (p *Platform) formatReplyContent(richText *richTextContent, fallback string, senderStaffId string, conversationIds ...string) string {
 	content := richText.Content
 	if content == "" {
 		content = fallback
 	}
 
 	quotedText := extractQuotedText(richText.RepliedMsg)
-	if quotedText == "" {
-		return content
-	}
-
 	if mctx := parseMulticaContext(quotedText); mctx != nil {
 		return formatMulticaReply(mctx, content)
 	}
@@ -1172,11 +1185,20 @@ func (p *Platform) formatReplyContent(richText *richTextContent, fallback string
 	// DingTalk truncates quoted content for bot-sent sampleMarkdown messages.
 	// Fall back to stored notification context for this user.
 	if meta, ok := p.getNotifyContext(senderStaffId); ok {
-		wsID := meta["workspace_id"]
-		issueID := meta["issue_id"]
-		if wsID != "" && issueID != "" {
-			return formatMulticaReply(&multicaContext{WorkspaceID: wsID, IssueID: issueID}, content)
+		if mctx := parseMulticaMetadata(meta); mctx != nil {
+			return formatMulticaReply(mctx, content)
 		}
+	}
+	if len(conversationIds) > 0 && conversationIds[0] != "" {
+		if meta, ok := p.getNotifyContext(groupNotifyContextKey(conversationIds[0])); ok {
+			if mctx := parseMulticaMetadata(meta); mctx != nil {
+				return formatMulticaReply(mctx, content)
+			}
+		}
+	}
+
+	if quotedText == "" {
+		return content
 	}
 
 	return fmt.Sprintf("引用: \"%s\"\n\n%s", quotedText, content)
@@ -1236,6 +1258,31 @@ func (p *Platform) ReconstructReplyCtx(sessionKey string) (any, error) {
 		isGroup:        convType == "g",
 		proactive:      true,
 	}, nil
+}
+
+func (p *Platform) StoreProactiveContext(sessionKey string, metadata map[string]string) {
+	if parseMulticaMetadata(metadata) == nil {
+		return
+	}
+	if idx := strings.Index(sessionKey, "dingtalk:"); idx > 0 {
+		sessionKey = sessionKey[idx:]
+	}
+	rctx, err := p.ReconstructReplyCtx(sessionKey)
+	if err != nil {
+		slog.Debug("dingtalk: skip proactive context for invalid session key", "session_key", sessionKey, "error", err)
+		return
+	}
+	rc, ok := rctx.(replyContext)
+	if !ok {
+		return
+	}
+	if rc.isGroup && rc.conversationId != "" {
+		p.storeNotifyContext(groupNotifyContextKey(rc.conversationId), metadata)
+		return
+	}
+	if rc.senderStaffId != "" {
+		p.storeNotifyContext(rc.senderStaffId, metadata)
+	}
 }
 
 // sendProactiveMessage sends a message using the DingTalk group/direct message API
@@ -1359,7 +1406,11 @@ func (p *Platform) storeNotifyContext(userID string, metadata map[string]string)
 	if p.notifyCtx == nil {
 		p.notifyCtx = make(map[string]notifyEntry)
 	}
-	p.notifyCtx[userID] = notifyEntry{metadata: metadata, timestamp: time.Now()}
+	meta := make(map[string]string, len(metadata))
+	for k, v := range metadata {
+		meta[k] = v
+	}
+	p.notifyCtx[userID] = notifyEntry{metadata: meta, timestamp: time.Now()}
 }
 
 func (p *Platform) getNotifyContext(userID string) (map[string]string, bool) {

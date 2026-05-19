@@ -37,6 +37,7 @@ type SendRequest struct {
 	Message    string            `json:"message"`
 	Images     []ImageAttachment `json:"images,omitempty"`
 	Files      []FileAttachment  `json:"files,omitempty"`
+	Metadata   map[string]string `json:"metadata,omitempty"`
 }
 
 // NewAPIServer creates an API server on a Unix socket.
@@ -172,7 +173,7 @@ func (s *APIServer) handleSend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := engine.SendToSessionWithAttachments(req.SessionKey, req.Message, req.Images, req.Files); err != nil {
+	if err := engine.SendToSessionWithMetadata(req.SessionKey, req.Message, req.Images, req.Files, req.Metadata); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}

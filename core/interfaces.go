@@ -25,6 +25,14 @@ type ReplyContextReconstructor interface {
 	ReconstructReplyCtx(sessionKey string) (any, error)
 }
 
+// ProactiveContextStorer is an optional interface for platforms that need to
+// remember metadata attached to proactive sends. This lets a later user reply
+// recover structured context even when the messaging platform truncates the
+// quoted message body.
+type ProactiveContextStorer interface {
+	StoreProactiveContext(sessionKey string, metadata map[string]string)
+}
+
 // MessageRecallDetector is an optional interface for platforms that can check
 // whether the message targeted by a reply context was recalled/deleted.
 type MessageRecallDetector interface {

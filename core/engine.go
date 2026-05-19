@@ -3087,7 +3087,6 @@ func buildCardContent(thinking string, tools []cardToolEntry, answer string) str
 	return sb.String()
 }
 
-
 // unsolicitedReaderStopTimeout bounds how long stopUnsolicitedReader waits
 // for the reader goroutine to exit. The reader is structured so its iterations
 // are short (blocking adapter calls like RespondPermission are offloaded), so
@@ -3430,8 +3429,8 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 
 	// Streaming card: aggregate entire turn into a single updatable card.
 	var streamCard StreamingCard
-	var cardToolCalls []cardToolEntry // track tool calls for card content
-	var cardThinkingText string       // latest thinking text
+	var cardToolCalls []cardToolEntry  // track tool calls for card content
+	var cardThinkingText string        // latest thinking text
 	var cardAnswerText strings.Builder // accumulated answer text
 
 	if scp, ok := state.platform.(StreamingCardPlatform); ok {
@@ -8684,10 +8683,14 @@ func (e *Engine) tryProviderAddPreset(p Platform, msg *Message, switcher Provide
 // SendToSession sends a message to an active session from an external caller (API/CLI).
 // If sessionKey is empty, it picks the first active session.
 func (e *Engine) SendToSession(sessionKey, message string) error {
-	return e.SendToSessionWithAttachments(sessionKey, message, nil, nil)
+	return e.SendToSessionWithMetadata(sessionKey, message, nil, nil, nil)
 }
 
 func (e *Engine) SendToSessionWithAttachments(sessionKey, message string, images []ImageAttachment, files []FileAttachment) error {
+	return e.SendToSessionWithMetadata(sessionKey, message, images, files, nil)
+}
+
+func (e *Engine) SendToSessionWithMetadata(sessionKey, message string, images []ImageAttachment, files []FileAttachment, metadata map[string]string) error {
 	e.interactiveMu.Lock()
 
 	var state *interactiveState
@@ -8721,6 +8724,7 @@ func (e *Engine) SendToSessionWithAttachments(sessionKey, message string, images
 
 	var p Platform
 	var replyCtx any
+	effectiveSessionKey := sessionKey
 	if state != nil {
 		state.mu.Lock()
 		p = state.platform
@@ -8764,6 +8768,7 @@ func (e *Engine) SendToSessionWithAttachments(sessionKey, message string, images
 			}
 			p = targetPlatform
 			replyCtx = reconstructed
+			effectiveSessionKey = strippedKey
 		}
 	}
 
@@ -8776,6 +8781,11 @@ func (e *Engine) SendToSessionWithAttachments(sessionKey, message string, images
 	}
 	if (len(images) > 0 || len(files) > 0) && !e.attachmentSendEnabled {
 		return ErrAttachmentSendDisabled
+	}
+	if len(metadata) > 0 {
+		if storer, ok := p.(ProactiveContextStorer); ok {
+			storer.StoreProactiveContext(effectiveSessionKey, metadata)
+		}
 	}
 
 	var imageSender ImageSender

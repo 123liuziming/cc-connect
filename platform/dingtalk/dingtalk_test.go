@@ -57,7 +57,7 @@ func TestGetAccessToken_ConcurrentAccess(t *testing.T) {
 func TestGetAccessToken_MutexExists(t *testing.T) {
 	// Verify that the tokenMu mutex field exists and works
 	p := &Platform{
-		clientID:    "test_client",
+		clientID:     "test_client",
 		clientSecret: "test_secret",
 	}
 
@@ -411,6 +411,76 @@ func TestFormatReplyContent_StoredContextFallback(t *testing.T) {
 	}
 	if !strings.Contains(result, "mark this as done") {
 		t.Errorf("expected user message, got:\n%s", result)
+	}
+}
+
+func TestFormatReplyContent_StoredContextFallbackWithEmptyQuote(t *testing.T) {
+	p := &Platform{}
+	p.storeNotifyContext("user123", map[string]string{
+		"workspace_id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+		"issue_id":     "11111111-2222-3333-4444-555555555555",
+	})
+	repliedContent, _ := json.Marshal(repliedTextContent{Text: ""})
+	richText := &richTextContent{
+		Content:    "mark this as done",
+		IsReplyMsg: true,
+		RepliedMsg: &repliedMessage{
+			MsgType: "text",
+			Content: repliedContent,
+		},
+	}
+	result := p.formatReplyContent(richText, "", "user123")
+	if !strings.Contains(result, "[multica-reply workspace_id=aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee issue_id=11111111-2222-3333-4444-555555555555]") {
+		t.Errorf("expected stored context fallback, got:\n%s", result)
+	}
+	if !strings.Contains(result, "mark this as done") {
+		t.Errorf("expected user message, got:\n%s", result)
+	}
+}
+
+func TestFormatReplyContent_StoredGroupContextFallback(t *testing.T) {
+	p := &Platform{}
+	p.StoreProactiveContext("dingtalk:g:conv123", map[string]string{
+		"workspace_id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+		"issue_id":     "11111111-2222-3333-4444-555555555555",
+	})
+	repliedContent, _ := json.Marshal(repliedTextContent{Text: ""})
+	richText := &richTextContent{
+		Content:    "mark this as done",
+		IsReplyMsg: true,
+		RepliedMsg: &repliedMessage{
+			MsgType: "text",
+			Content: repliedContent,
+		},
+	}
+	result := p.formatReplyContent(richText, "", "user123", "conv123")
+	if !strings.Contains(result, "[multica-reply workspace_id=aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee issue_id=11111111-2222-3333-4444-555555555555]") {
+		t.Errorf("expected stored group context fallback, got:\n%s", result)
+	}
+	if !strings.Contains(result, "mark this as done") {
+		t.Errorf("expected user message, got:\n%s", result)
+	}
+}
+
+func TestFormatReplyContent_IgnoresInvalidStoredContext(t *testing.T) {
+	p := &Platform{}
+	p.storeNotifyContext("user123", map[string]string{
+		"workspace_id": "not-a-uuid",
+		"issue_id":     "11111111-2222-3333-4444-555555555555",
+	})
+	repliedContent, _ := json.Marshal(repliedTextContent{Text: "truncated quote"})
+	richText := &richTextContent{
+		Content:    "user reply",
+		IsReplyMsg: true,
+		RepliedMsg: &repliedMessage{
+			MsgType: "text",
+			Content: repliedContent,
+		},
+	}
+	result := p.formatReplyContent(richText, "", "user123")
+	expected := "引用: \"truncated quote\"\n\nuser reply"
+	if result != expected {
+		t.Errorf("formatReplyContent() = %q, want %q", result, expected)
 	}
 }
 
