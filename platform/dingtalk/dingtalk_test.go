@@ -388,14 +388,12 @@ func TestFormatReplyContent_EmptyQuotedText(t *testing.T) {
 	}
 }
 
-func TestFormatReplyContent_StoredContextFallback(t *testing.T) {
+func TestFormatReplyContent_NonEmptyQuoteDoesNotUseStoredContextFallback(t *testing.T) {
 	p := &Platform{}
-	// Pre-store notification context for user
 	p.storeNotifyContext("user123", map[string]string{
 		"workspace_id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
 		"issue_id":     "11111111-2222-3333-4444-555555555555",
 	})
-	// Simulate DingTalk truncating the quoted text (no multica marker)
 	repliedContent, _ := json.Marshal(repliedTextContent{Text: "### Multica · Fix lo..."})
 	richText := &richTextContent{
 		Content:    "mark this as done",
@@ -406,11 +404,9 @@ func TestFormatReplyContent_StoredContextFallback(t *testing.T) {
 		},
 	}
 	result := p.formatReplyContent(richText, "", "user123")
-	if !strings.Contains(result, "[multica-reply workspace_id=aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee issue_id=11111111-2222-3333-4444-555555555555]") {
-		t.Errorf("expected stored context fallback, got:\n%s", result)
-	}
-	if !strings.Contains(result, "mark this as done") {
-		t.Errorf("expected user message, got:\n%s", result)
+	expected := "引用: \"### Multica · Fix lo...\"\n\nmark this as done"
+	if result != expected {
+		t.Errorf("formatReplyContent() = %q, want %q", result, expected)
 	}
 }
 
@@ -438,7 +434,7 @@ func TestFormatReplyContent_StoredContextFallbackWithEmptyQuote(t *testing.T) {
 	}
 }
 
-func TestFormatReplyContent_StoredGroupContextFallback(t *testing.T) {
+func TestFormatReplyContent_GroupDoesNotUseStoredContextFallback(t *testing.T) {
 	p := &Platform{}
 	p.StoreProactiveContext("dingtalk:g:conv123", map[string]string{
 		"workspace_id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
@@ -454,11 +450,36 @@ func TestFormatReplyContent_StoredGroupContextFallback(t *testing.T) {
 		},
 	}
 	result := p.formatReplyContent(richText, "", "user123", "conv123")
-	if !strings.Contains(result, "[multica-reply workspace_id=aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee issue_id=11111111-2222-3333-4444-555555555555]") {
-		t.Errorf("expected stored group context fallback, got:\n%s", result)
+	if result != "mark this as done" {
+		t.Errorf("formatReplyContent() = %q, want %q", result, "mark this as done")
 	}
-	if !strings.Contains(result, "mark this as done") {
-		t.Errorf("expected user message, got:\n%s", result)
+}
+
+func TestFormatReplyContent_QuotedMarkerWinsOverStoredGroupContext(t *testing.T) {
+	p := &Platform{}
+	p.StoreProactiveContext("dingtalk:g:conv123", map[string]string{
+		"workspace_id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+		"issue_id":     "11111111-2222-3333-4444-555555555555",
+	})
+	quotedText := "[multica:ws=bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb,issue=22222222-3333-4444-5555-666666666666]\n### Multica · Referenced issue"
+	repliedContent, _ := json.Marshal(repliedMarkdownContent{
+		Title: "Multica · Referenced issue",
+		Text:  quotedText,
+	})
+	richText := &richTextContent{
+		Content:    "mark this as done",
+		IsReplyMsg: true,
+		RepliedMsg: &repliedMessage{
+			MsgType: "sampleMarkdown",
+			Content: repliedContent,
+		},
+	}
+	result := p.formatReplyContent(richText, "", "user123", "conv123")
+	if !strings.Contains(result, "[multica-reply workspace_id=bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb issue_id=22222222-3333-4444-5555-666666666666]") {
+		t.Errorf("expected quoted marker to win over stored group context, got:\n%s", result)
+	}
+	if strings.Contains(result, "11111111-2222-3333-4444-555555555555") {
+		t.Errorf("unexpected stale group issue context in result:\n%s", result)
 	}
 }
 
@@ -690,6 +711,17 @@ func TestExtractQuotedText_SampleMarkdownType(t *testing.T) {
 	}
 }
 
+func TestExtractQuotedText_SampleMarkdownTitlePlaceholder(t *testing.T) {
+	content, _ := json.Marshal(repliedMarkdownContent{
+		Title: "[multica:ws=aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee,issue=11111111-2222-3333-4444-555555555555] Multica · Fix login",
+		Text:  "#title#",
+	})
+	got := extractQuotedText(&repliedMessage{MsgType: "sampleMarkdown", Content: content})
+	if !strings.Contains(got, "issue=11111111-2222-3333-4444-555555555555") {
+		t.Errorf("extractQuotedText(sampleMarkdown placeholder) = %q, want title with marker", got)
+	}
+}
+
 func TestExtractQuotedText_MarkdownType(t *testing.T) {
 	content, _ := json.Marshal(repliedMarkdownContent{Title: "T", Text: "md body"})
 	got := extractQuotedText(&repliedMessage{MsgType: "markdown", Content: content})
@@ -709,5 +741,16 @@ func TestExtractQuotedText_Nil(t *testing.T) {
 	got := extractQuotedText(nil)
 	if got != "" {
 		t.Errorf("extractQuotedText(nil) = %q, want empty", got)
+	}
+}
+
+func TestDingTalkMarkdownTitle_PreservesMulticaMarker(t *testing.T) {
+	content := "[multica:ws=aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee,issue=11111111-2222-3333-4444-555555555555]\n\n### Multica · [AONE-82229688] Fix login"
+	got := dingtalkMarkdownTitle(content)
+	if !strings.HasPrefix(got, "[multica:ws=aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee,issue=11111111-2222-3333-4444-555555555555]") {
+		t.Errorf("dingtalkMarkdownTitle() = %q, want marker prefix", got)
+	}
+	if !strings.Contains(got, "Multica · [AONE-82229688] Fix login") {
+		t.Errorf("dingtalkMarkdownTitle() = %q, want human title", got)
 	}
 }

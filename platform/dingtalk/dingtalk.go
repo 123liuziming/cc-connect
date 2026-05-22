@@ -1155,6 +1155,9 @@ func extractQuotedText(replied *repliedMessage) string {
 			slog.Debug("dingtalk: failed to parse replied markdown content", "error", err)
 			return ""
 		}
+		if strings.TrimSpace(c.Text) == "" || strings.TrimSpace(c.Text) == "#title#" {
+			return c.Title
+		}
 		return c.Text
 	default:
 		slog.Debug("dingtalk: quoted message type not supported", "type", replied.MsgType)
@@ -1169,8 +1172,10 @@ func extractQuotedText(replied *repliedMessage) string {
 // When the quoted message contains a [multica:...] context marker, the reply
 // is formatted as a structured Multica command context so the AI agent can
 // use multica CLI to interact with the referenced issue. If the marker is
-// missing (DingTalk truncates quoted content), falls back to stored notification
-// context for the sender.
+// missing and DingTalk did not provide any quoted text, falls back to stored
+// notification context for the sender in direct chats. Group chats intentionally
+// do not use the latest stored context: without a marker in the quoted message,
+// the cache can point at the newest issue instead of the message the user quoted.
 func (p *Platform) formatReplyContent(richText *richTextContent, fallback string, senderStaffId string, conversationIds ...string) string {
 	content := richText.Content
 	if content == "" {
@@ -1181,27 +1186,24 @@ func (p *Platform) formatReplyContent(richText *richTextContent, fallback string
 	if mctx := parseMulticaContext(quotedText); mctx != nil {
 		return formatMulticaReply(mctx, content)
 	}
+	if quotedText != "" {
+		return fmt.Sprintf("引用: \"%s\"\n\n%s", quotedText, content)
+	}
 
-	// DingTalk truncates quoted content for bot-sent sampleMarkdown messages.
-	// Fall back to stored notification context for this user.
+	if len(conversationIds) > 0 && conversationIds[0] != "" {
+		return content
+	}
+
+	// DingTalk sometimes omits quoted content for bot-sent sampleMarkdown
+	// messages in direct chats. Fall back to stored notification context only
+	// when there is no quoted text to correlate.
 	if meta, ok := p.getNotifyContext(senderStaffId); ok {
 		if mctx := parseMulticaMetadata(meta); mctx != nil {
 			return formatMulticaReply(mctx, content)
 		}
 	}
-	if len(conversationIds) > 0 && conversationIds[0] != "" {
-		if meta, ok := p.getNotifyContext(groupNotifyContextKey(conversationIds[0])); ok {
-			if mctx := parseMulticaMetadata(meta); mctx != nil {
-				return formatMulticaReply(mctx, content)
-			}
-		}
-	}
 
-	if quotedText == "" {
-		return content
-	}
-
-	return fmt.Sprintf("引用: \"%s\"\n\n%s", quotedText, content)
+	return content
 }
 
 func formatMulticaReply(mctx *multicaContext, userMessage string) string {
@@ -1294,6 +1296,7 @@ func (p *Platform) sendProactiveMessage(ctx context.Context, rc replyContext, co
 		return fmt.Errorf("dingtalk: get access token for proactive send: %w", err)
 	}
 
+	title := dingtalkMarkdownTitle(content)
 	content = preprocessDingTalkMarkdown(content)
 
 	var apiURL string
@@ -1302,7 +1305,7 @@ func (p *Platform) sendProactiveMessage(ctx context.Context, rc replyContext, co
 	if rc.isGroup && rc.conversationId != "" {
 		// Group message via /v1.0/robot/groupMessages/send
 		apiURL = "https://api.dingtalk.com/v1.0/robot/groupMessages/send"
-		msgParam, _ := json.Marshal(map[string]string{"text": content})
+		msgParam, _ := json.Marshal(map[string]string{"title": title, "text": content})
 		requestBody = map[string]any{
 			"robotCode":          p.robotCode,
 			"openConversationId": rc.conversationId,
@@ -1312,7 +1315,7 @@ func (p *Platform) sendProactiveMessage(ctx context.Context, rc replyContext, co
 	} else if rc.senderStaffId != "" {
 		// Direct message via /v1.0/robot/oToMessages/batchSend
 		apiURL = "https://api.dingtalk.com/v1.0/robot/oToMessages/batchSend"
-		msgParam, _ := json.Marshal(map[string]string{"title": "reply", "text": content})
+		msgParam, _ := json.Marshal(map[string]string{"title": title, "text": content})
 		requestBody = map[string]any{
 			"robotCode": p.robotCode,
 			"userIds":   []string{rc.senderStaffId},
@@ -1461,4 +1464,36 @@ func preprocessDingTalkMarkdown(s string) string {
 		}
 	}
 	return sb.String()
+}
+
+func dingtalkMarkdownTitle(content string) string {
+	marker := ""
+	if m := multicaContextRe.FindString(content); m != "" {
+		marker = m
+	}
+
+	humanTitle := ""
+	for _, line := range strings.Split(content, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || line == marker {
+			continue
+		}
+		line = strings.TrimSpace(strings.TrimLeft(line, "#"))
+		line = strings.TrimSpace(strings.TrimPrefix(line, ">"))
+		if line != "" {
+			humanTitle = line
+			break
+		}
+	}
+
+	switch {
+	case marker != "" && humanTitle != "":
+		return marker + " " + humanTitle
+	case marker != "":
+		return marker
+	case humanTitle != "":
+		return humanTitle
+	default:
+		return "cc-connect"
+	}
 }
